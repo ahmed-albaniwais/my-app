@@ -914,6 +914,7 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         )
 
 st.success("✅ تم إعداد التقرير بنجاح.")
+
 st.download_button(
     label="📥 تحميل التقرير الكامل (Excel)",
     data=output.getvalue(),
