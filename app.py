@@ -919,6 +919,5 @@ st.download_button(
     file_name="report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
