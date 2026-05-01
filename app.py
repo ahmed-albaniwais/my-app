@@ -616,27 +616,9 @@ all_products_horizontal_summary = base_lines_all.groupby(group_cols_product).agg
     total_quality_lines=("SUB_MSISDN", lambda s: s[base_lines_all.loc[s.index, "IS_QUALITY"]].nunique()),
 ).reset_index()
 
-# إصلاح أنواع أعمدة الدمج قبل دمج فئات الباقات
-for col in merge_keys:
-    if col in all_products_horizontal_summary.columns:
-        all_products_horizontal_summary[col] = (
-            all_products_horizontal_summary[col]
-            .astype(str)
-            .str.strip()
-            .str.replace(".0", "", regex=False)
-        )
-
-    if col in package_group_summary.columns:
-        package_group_summary[col] = (
-            package_group_summary[col]
-            .astype(str)
-            .str.strip()
-            .str.replace(".0", "", regex=False)
-        )
-
 all_products_horizontal_summary = all_products_horizontal_summary.merge(
-    package_group_summary,
-    on=merge_keys,
+    stock_by_product,
+    on=["DEALER_MSISDN_normalized", "PRODUCT_TYPE"],
     how="left"
 )
 
@@ -698,6 +680,26 @@ for c in ["باقات 5", "باقات 10", "باقات 15", "باقات 20", "ب
 merge_keys = ["DEALER_MSISDN", "المنتج"]
 if "CODE" in all_products_horizontal_summary.columns and "CODE" in package_group_summary.columns:
     merge_keys.append("CODE")
+
+# =========================================================
+# ✅ إصلاح خطأ merge: توحيد نوع أعمدة الدمج قبل الدمج
+# =========================================================
+for col in merge_keys:
+    if col in all_products_horizontal_summary.columns:
+        all_products_horizontal_summary[col] = (
+            all_products_horizontal_summary[col]
+            .astype(str)
+            .str.strip()
+            .str.replace(".0", "", regex=False)
+        )
+
+    if col in package_group_summary.columns:
+        package_group_summary[col] = (
+            package_group_summary[col]
+            .astype(str)
+            .str.strip()
+            .str.replace(".0", "", regex=False)
+        )
 
 all_products_horizontal_summary = all_products_horizontal_summary.merge(
     package_group_summary,
@@ -916,5 +918,7 @@ st.download_button(
     label="📥 تحميل التقرير الكامل (Excel)",
     data=output.getvalue(),
     file_name="تقرير_الوكلاء_نهائي.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
