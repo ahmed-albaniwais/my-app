@@ -681,9 +681,7 @@ merge_keys = ["DEALER_MSISDN", "المنتج"]
 if "CODE" in all_products_horizontal_summary.columns and "CODE" in package_group_summary.columns:
     merge_keys.append("CODE")
 
-# =========================================================
-# ✅ إصلاح خطأ merge: توحيد نوع أعمدة الدمج قبل الدمج
-# =========================================================
+# إصلاح نوع أعمدة الدمج قبل merge حتى لا يظهر خطأ int64/object
 for col in merge_keys:
     if col in all_products_horizontal_summary.columns:
         all_products_horizontal_summary[col] = (
@@ -913,13 +911,13 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             }
         )
 
-st.success("تم إعداد التقرير بنجاح")
-
+st.success("✅ تم إعداد التقرير بنجاح.")
 st.download_button(
-    label="تحميل التقرير الكامل (Excel)",
+    label="📥 تحميل التقرير الكامل (Excel)",
     data=output.getvalue(),
-    file_name="report.xlsx",
+    file_name="تقرير_الوكلاء_نهائي.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
