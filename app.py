@@ -616,9 +616,27 @@ all_products_horizontal_summary = base_lines_all.groupby(group_cols_product).agg
     total_quality_lines=("SUB_MSISDN", lambda s: s[base_lines_all.loc[s.index, "IS_QUALITY"]].nunique()),
 ).reset_index()
 
+# إصلاح أنواع أعمدة الدمج قبل دمج فئات الباقات
+for col in merge_keys:
+    if col in all_products_horizontal_summary.columns:
+        all_products_horizontal_summary[col] = (
+            all_products_horizontal_summary[col]
+            .astype(str)
+            .str.strip()
+            .str.replace(".0", "", regex=False)
+        )
+
+    if col in package_group_summary.columns:
+        package_group_summary[col] = (
+            package_group_summary[col]
+            .astype(str)
+            .str.strip()
+            .str.replace(".0", "", regex=False)
+        )
+
 all_products_horizontal_summary = all_products_horizontal_summary.merge(
-    stock_by_product,
-    on=["DEALER_MSISDN_normalized", "PRODUCT_TYPE"],
+    package_group_summary,
+    on=merge_keys,
     how="left"
 )
 
