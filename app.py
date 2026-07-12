@@ -927,11 +927,7 @@ output = BytesIO()
 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
     report.to_excel(writer, sheet_name="تقرير المنتجات", index=False)
     bundle_final.to_excel(writer, sheet_name="تقرير الباقات (كامل)", index=False)
-    df_stock_summary.to_excel(writer, sheet_name="تقرير المخزون", index=False)
-    yooz_violations_report.to_excel(writer, sheet_name="مخالفات يوز", index=False)
-    daily_red_yooz_bundle_summary.to_excel(writer, sheet_name="يومي ريد ويوز (تفصيلي)", index=False)
     daily_red_yooz_bundle_pivot.to_excel(writer, sheet_name="يومي ريد ويوز (ملخص)", index=False)
-    red_yooz_combined_summary.to_excel(writer, sheet_name="ملخص ريد+يوز", index=False)
     all_products_horizontal_summary.to_excel(writer, sheet_name="ملخص جميع المنتجات", index=False)
     points_report.to_excel(writer, sheet_name="تقرير النقاط", index=False)
 
@@ -995,9 +991,12 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
 
 st.success("تم إعداد التقرير بنجاح")
 
+output.seek(0)
+
 st.download_button(
     label="تحميل التقرير الكامل (Excel)",
-    data=output.getvalue(),
+    data=output,
     file_name="report.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True
 )
