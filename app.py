@@ -167,6 +167,24 @@ for c in ["POS_MSISDN", "ITEM_NAME"]:
     normalize_str_col(df_stock, c)
 
 # =========================================================
+# تجهيز النقاط من ملف التفعيل نفسه
+# =========================================================
+if "BUNDLE_POINT" not in df_activation.columns:
+    st.error("⚠️ ملف التفعيل لا يحتوي على عمود BUNDLE_POINT.")
+    st.stop()
+
+df_activation["BUNDLE_POINT"] = pd.to_numeric(
+    df_activation["BUNDLE_POINT"], errors="coerce"
+).fillna(0)
+
+# تجميع نقاط كل رقم من ملف التفعيل
+points_per_sub = (
+    df_activation
+    .groupby("SUB_MSISDN", as_index=False)["BUNDLE_POINT"]
+    .sum()
+)
+
+# =========================================================
 # تجهيز تاريخ التفعيل في ملف التفعيل
 # =========================================================
 act_date_col = pick_first_existing(df_activation.columns, ["ACTIVATION_DATE", "ACTIVATION_DT", "ACT_DATE", "DATE"])
@@ -737,6 +755,69 @@ all_products_horizontal_summary = all_products_horizontal_summary.sort_values(
 ).reset_index(drop=True)
 
 # =========================================================
+# ✅ تقرير النقاط — نفس ملخص جميع المنتجات مع نقاط تقرير الجودة
+# =========================================================
+points_lines = base_lines_all.merge(
+    points_per_sub,
+    on="SUB_MSISDN",
+    how="left"
+)
+
+points_lines["BUNDLE_POINT"] = points_lines["BUNDLE_POINT"].fillna(0)
+
+points_group_cols = ["PRODUCT_TYPE", "DEALER_MSISDN"]
+if "CODE" in points_lines.columns:
+    points_group_cols.append("CODE")
+
+points_summary = (
+    points_lines
+    .groupby(points_group_cols, as_index=False)["BUNDLE_POINT"]
+    .sum()
+    .rename(columns={"PRODUCT_TYPE": "المنتج"})
+)
+
+points_merge_keys = ["المنتج", "DEALER_MSISDN"]
+if "CODE" in all_products_horizontal_summary.columns and "CODE" in points_summary.columns:
+    points_merge_keys.append("CODE")
+
+for col in points_merge_keys:
+    all_products_horizontal_summary[col] = (
+        all_products_horizontal_summary[col]
+        .astype(str)
+        .str.strip()
+        .str.replace(".0", "", regex=False)
+    )
+    points_summary[col] = (
+        points_summary[col]
+        .astype(str)
+        .str.strip()
+        .str.replace(".0", "", regex=False)
+    )
+
+points_report = all_products_horizontal_summary.merge(
+    points_summary,
+    on=points_merge_keys,
+    how="left"
+)
+
+points_report["BUNDLE_POINT"] = points_report["BUNDLE_POINT"].fillna(0)
+if (points_report["BUNDLE_POINT"] % 1 == 0).all():
+    points_report["BUNDLE_POINT"] = points_report["BUNDLE_POINT"].astype(int)
+
+points_report = points_report.sort_values(
+    by=["DEALER_MSISDN", "المنتج"]
+).reset_index(drop=True)
+
+# أسماء عربية واضحة داخل ورقة تقرير النقاط
+points_report = points_report.rename(columns={
+    "total_activated_lines": "التفعيل الكلي",
+    "total_lines_with_valid_bundle": "تفعيل بالباقات",
+    "total_lines_without_bundle": "تفعيل بدون باقة",
+    "yooz_lines_with_non_yooz_bundle": "خط يوز باقة ريد",
+    "BUNDLE_POINT": "النقاط"
+})
+
+# =========================================================
 # تقرير الباقات (كامل) — كل الباقات داخل وخارج الفترة
 # =========================================================
 if "DEALER_MSISDN" not in df_bundle.columns:
@@ -852,6 +933,7 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
     daily_red_yooz_bundle_pivot.to_excel(writer, sheet_name="يومي ريد ويوز (ملخص)", index=False)
     red_yooz_combined_summary.to_excel(writer, sheet_name="ملخص ريد+يوز", index=False)
     all_products_horizontal_summary.to_excel(writer, sheet_name="ملخص جميع المنتجات", index=False)
+    points_report.to_excel(writer, sheet_name="تقرير النقاط", index=False)
 
     # =========================================================
     # شيت مساعد للتلوين: Pivot للمخالفات فقط (مخفي)
