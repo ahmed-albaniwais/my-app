@@ -515,10 +515,17 @@ def has_any_bundle(s: pd.Series) -> bool:
 bundle_flags = df_flags_src.groupby("SUB_MSISDN").agg(
     has_any_bundle=("BUNDLE_NAME_CLEAN", has_any_bundle),
     has_yooz_any=("BUNDLE_NAME_CLEAN", lambda s: s.dropna().astype(str).str.strip().pipe(
-        lambda x: (x.ne("") & x.apply(is_yooz_bundle)).any()
+        lambda x: (
+            x.ne("")
+            & x.apply(is_yooz_bundle).astype(bool)
+        ).any()
     )),
     has_non_yooz_violation=("BUNDLE_NAME_CLEAN", lambda s: s.dropna().astype(str).str.strip().pipe(
-        lambda x: (x.ne("") & (~x.isin(EXCEPTION_BUNDLES)) & (~x.apply(is_yooz_bundle))).any()
+        lambda x: (
+            x.ne("")
+            & ~x.isin(EXCEPTION_BUNDLES)
+            & ~x.apply(is_yooz_bundle).astype(bool)
+        ).any()
     )),
     has_daily300=("BUNDLE_NAME_CLEAN", lambda s: (s.dropna().astype(str).str.strip() == "Daily300MB").any()),
     has_pubg=("BUNDLE_NAME_CLEAN", lambda s: (s.dropna().astype(str).str.strip() == "PUBG").any()),
@@ -989,14 +996,18 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             }
         )
 
-st.success("تم إعداد التقرير بنجاح")
-
+# تثبيت ملف Excel داخل جلسة المستخدم لتفادي فقدان رابط التحميل
 output.seek(0)
+st.session_state["excel_report"] = output.read()
+
+st.success("تم إعداد التقرير بنجاح")
 
 st.download_button(
     label="تحميل التقرير الكامل (Excel)",
-    data=output,
+    data=st.session_state["excel_report"],
     file_name="report.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    key="download_excel_report",
+    on_click="ignore",
     use_container_width=True
 )
