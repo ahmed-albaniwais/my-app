@@ -964,6 +964,251 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
     viol_helper.to_excel(writer, sheet_name="مخالفات_تلوين", index=False)
 
     workbook = writer.book
+
+    # =========================================================
+    # =========================================================
+    # =========================================================
+    # إضافة فلاتر مباشرة إلى ورقة تقرير النقاط
+    # =========================================================
+    ws_points = writer.sheets["تقرير النقاط"]
+    ws_points.right_to_left()
+    ws_points.freeze_panes(1, 0)
+    ws_points.hide_gridlines(2)
+
+    if len(points_report.columns) > 0:
+        points_table_columns = [
+            {"header": str(col)} for col in points_report.columns
+        ]
+
+        # تحويل بيانات تقرير النقاط إلى جدول Excel بفلاتر متعددة الاختيار
+        ws_points.add_table(
+            0,
+            0,
+            max(len(points_report), 1),
+            len(points_report.columns) - 1,
+            {
+                "name": "PointsReportTable",
+                "columns": points_table_columns,
+                "style": "Table Style Medium 2",
+                "autofilter": True,
+            }
+        )
+
+        for col_num, col_name in enumerate(points_report.columns):
+            width = 15
+            if col_name in ["SHOP_NAME_SHOW", "REP_NAME_SHOW"]:
+                width = 28
+            elif col_name == "DEALER_MSISDN":
+                width = 18
+            ws_points.set_column(col_num, col_num, width)
+
+    # =========================================================
+    # تقرير المندوب اليومي حسب تاريخ التفعيل
+    # بدون معادلات، ويعمل على Excel القديم والجوال
+    # يمكن تحديد مندوب، تاريخ، ومنتج واحد أو عدة منتجات من الفلاتر
+    # =========================================================
+    daily_rep_source = df_activation.copy()
+
+    daily_rep_source["DEALER_MSISDN"] = (
+        daily_rep_source["DEALER_MSISDN"]
+        .astype(str)
+        .str.strip()
+    )
+    daily_rep_source["SUB_MSISDN"] = (
+        daily_rep_source["SUB_MSISDN"]
+        .astype(str)
+        .str.strip()
+    )
+
+    # إضافة بيانات المكتب والمندوب
+    daily_customer_cols = [
+        "DEALER_MSISDN", "SHOP_NAME", "REP_NAME"
+    ]
+    if "CODE" in df_customers.columns:
+        daily_customer_cols.append("CODE")
+
+    daily_rep_source = daily_rep_source.merge(
+        df_customers[daily_customer_cols].drop_duplicates(),
+        on="DEALER_MSISDN",
+        how="left"
+    )
+
+    # إضافة نوع الخط من تقرير الباقات
+    daily_rep_source = daily_rep_source.merge(
+        bundle_type_per_sub.rename(
+            columns={"PRODUCT_TYPE_FROM_BUNDLE": "PRODUCT_TYPE"}
+        ),
+        on="SUB_MSISDN",
+        how="left"
+    )
+
+    daily_rep_source["PRODUCT_TYPE"] = (
+        daily_rep_source["PRODUCT_TYPE"]
+        .fillna("غير معروف")
+    )
+    daily_rep_source["REP_NAME"] = (
+        daily_rep_source["REP_NAME"]
+        .fillna("غير معروف")
+    )
+    daily_rep_source["SHOP_NAME"] = (
+        daily_rep_source["SHOP_NAME"]
+        .fillna("مكتب غير معروف")
+    )
+
+    if "CODE" in daily_rep_source.columns:
+        daily_rep_source["CODE"] = (
+            daily_rep_source["CODE"]
+            .fillna("—")
+            .astype(str)
+            .str.replace(".0", "", regex=False)
+        )
+
+    daily_rep_source["BUNDLE_POINT"] = pd.to_numeric(
+        daily_rep_source["BUNDLE_POINT"],
+        errors="coerce"
+    ).fillna(0)
+
+    # التجميع اليومي: كل مكتب + مندوب + نوع خط + تاريخ
+    daily_group_cols = [
+        "ACTIVATION_DATE",
+        "REP_NAME",
+        "SHOP_NAME",
+        "DEALER_MSISDN",
+        "PRODUCT_TYPE",
+    ]
+    if "CODE" in daily_rep_source.columns:
+        daily_group_cols.insert(4, "CODE")
+
+    daily_rep_report = (
+        daily_rep_source
+        .groupby(daily_group_cols, dropna=False)
+        .agg(
+            عدد_التفعيلات=("SUB_MSISDN", "nunique"),
+            مجموع_النقاط=("BUNDLE_POINT", "sum"),
+        )
+        .reset_index()
+    )
+
+    daily_rep_report = daily_rep_report.rename(columns={
+        "ACTIVATION_DATE": "تاريخ التفعيل",
+        "REP_NAME": "المندوب",
+        "SHOP_NAME": "اسم المكتب",
+        "DEALER_MSISDN": "رقم المكتب",
+        "CODE": "الكود",
+        "PRODUCT_TYPE": "نوع الخط",
+        "عدد_التفعيلات": "عدد التفعيلات",
+        "مجموع_النقاط": "مجموع النقاط",
+    })
+
+    daily_order = [
+        "تاريخ التفعيل",
+        "المندوب",
+        "اسم المكتب",
+        "رقم المكتب",
+        "الكود",
+        "نوع الخط",
+        "عدد التفعيلات",
+        "مجموع النقاط",
+    ]
+    daily_order = [
+        c for c in daily_order if c in daily_rep_report.columns
+    ]
+    daily_rep_report = daily_rep_report[daily_order]
+
+    daily_rep_report = daily_rep_report.sort_values(
+        by=[
+            c for c in [
+                "تاريخ التفعيل",
+                "المندوب",
+                "اسم المكتب",
+                "نوع الخط",
+            ]
+            if c in daily_rep_report.columns
+        ]
+    ).reset_index(drop=True)
+
+    # كتابة الورقة الجديدة
+    daily_sheet_name = "تقرير المندوب اليومي"
+    daily_rep_report.to_excel(
+        writer,
+        sheet_name=daily_sheet_name,
+        index=False,
+        startrow=3
+    )
+
+    ws_daily = writer.sheets[daily_sheet_name]
+    ws_daily.right_to_left()
+    ws_daily.hide_gridlines(2)
+
+    daily_title_fmt = workbook.add_format({
+        "bold": True,
+        "font_size": 16,
+        "font_color": "#FFFFFF",
+        "bg_color": "#1F4E78",
+        "align": "center",
+        "valign": "vcenter",
+        "border": 1,
+    })
+
+    daily_note_fmt = workbook.add_format({
+        "italic": True,
+        "font_color": "#666666",
+        "align": "right",
+        "valign": "vcenter",
+    })
+
+    daily_date_fmt = workbook.add_format({
+        "num_format": "dd/mm/yyyy"
+    })
+
+    daily_last_col = max(len(daily_rep_report.columns) - 1, 0)
+
+    ws_daily.merge_range(
+        0, 0, 0, daily_last_col,
+        "التقرير اليومي للمندوب حسب تاريخ التفعيل",
+        daily_title_fmt
+    )
+
+    ws_daily.merge_range(
+        1, 0, 1, daily_last_col,
+        "من سهم الفلتر اختر المندوب والتاريخ، ثم اختر نوع خط واحد أو عدة أنواع. سيظهر عدد التفعيلات ومجموع النقاط لكل مكتب.",
+        daily_note_fmt
+    )
+
+    if len(daily_rep_report.columns) > 0:
+        daily_table_columns = [
+            {"header": str(col)} for col in daily_rep_report.columns
+        ]
+
+        ws_daily.add_table(
+            3,
+            0,
+            3 + max(len(daily_rep_report), 1),
+            daily_last_col,
+            {
+                "name": "DailyRepresentativeTable",
+                "columns": daily_table_columns,
+                "style": "Table Style Medium 2",
+                "autofilter": True,
+            }
+        )
+
+    ws_daily.freeze_panes(4, 0)
+
+    for col_num, col_name in enumerate(daily_rep_report.columns):
+        width = 16
+        if col_name in ["اسم المكتب", "المندوب"]:
+            width = 28
+        elif col_name == "رقم المكتب":
+            width = 18
+        elif col_name == "تاريخ التفعيل":
+            width = 15
+            ws_daily.set_column(
+                col_num, col_num, width, daily_date_fmt
+            )
+            continue
+        ws_daily.set_column(col_num, col_num, width)
+
     ws_report = writer.sheets["تقرير الباقات (كامل)"]
     ws_viol   = writer.sheets["مخالفات_تلوين"]
     ws_viol.hide()
