@@ -1241,18 +1241,1100 @@ with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             }
         )
 
-# تثبيت ملف Excel داخل جلسة المستخدم لتفادي فقدان رابط التحميل
-output.seek(0)
-st.session_state["excel_report"] = output.read()
+# =========================================================
+# تجهيز ملف Excel للتنزيل بطريقة متوافقة مع السيرفر
+# =========================================================
+excel_bytes = output.getvalue()
+
+if not excel_bytes:
+    st.error("تعذر إنشاء ملف Excel. يرجى إعادة رفع الملفات والمحاولة مرة أخرى.")
+    st.stop()
 
 st.success("تم إعداد التقرير بنجاح")
 
 st.download_button(
     label="تحميل التقرير الكامل (Excel)",
-    data=st.session_state["excel_report"],
+    data=excel_bytes,
     file_name="report.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    key="download_excel_report",
-    on_click="ignore",
-    use_container_width=True
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
+
+# =========================================================
+# بوابة تقارير الأداء الفردية للمندوبين
+# =========================================================
+import zipfile
+import re
+from datetime import timedelta
+
+st.divider()
+st.header("📊 تقارير الأداء الفردية للمندوبين")
+st.caption(
+    "اختر المندوب لعرض تقرير متجاوب مناسب للجوال، مع إمكانية تحميل ملف Excel عند الحاجة."
+)
+
+def _safe_file_name(value):
+    value = re.sub(r'[\\/:*?"<>|]+', "_", str(value)).strip()
+    return value or "representative"
+
+def _clean_number(value):
+    try:
+        number = float(value)
+        if number.is_integer():
+            return int(number)
+        return round(number, 2)
+    except Exception:
+        return 0
+
+def build_representative_workbook(rep_name):
+    """إنشاء ملف Excel مستقل لمندوب واحد."""
+    rep_raw = daily_rep_source[
+        daily_rep_source["REP_NAME"].astype(str).str.strip() == str(rep_name).strip()
+    ].copy()
+
+    # بيانات التقرير حسب نطاق التاريخ المحدد في الشريط الجانبي
+    report_raw = rep_raw[
+        (rep_raw["ACTIVATION_DATE"] >= start_date) &
+        (rep_raw["ACTIVATION_DATE"] <= end_date)
+    ].copy()
+
+    # إضافة مؤشرات الباقات للتنبيهات
+    flags_for_rep = bundle_flags.copy()
+    flags_for_rep["SUB_MSISDN"] = flags_for_rep["SUB_MSISDN"].astype(str).str.strip()
+
+    report_flags = report_raw.merge(
+        flags_for_rep,
+        on="SUB_MSISDN",
+        how="left"
+    )
+    for flag_col in [
+        "has_any_bundle", "has_yooz_any", "has_non_yooz_violation",
+        "has_daily300", "has_pubg"
+    ]:
+        if flag_col not in report_flags.columns:
+            report_flags[flag_col] = False
+        report_flags[flag_col] = report_flags[flag_col].fillna(False)
+
+    # مؤشرات عامة بدون مقارنة زمنية
+    total_activations = int(report_raw["SUB_MSISDN"].nunique())
+    total_points = _clean_number(report_raw["BUNDLE_POINT"].sum())
+    office_count = int(report_raw["DEALER_MSISDN"].nunique())
+    selected_days = max((end_date - start_date).days + 1, 1)
+    average_daily = round(total_activations / selected_days, 2)
+
+    # الأداء اليومي
+    daily_performance = (
+        report_raw.groupby(
+            ["ACTIVATION_DATE", "SHOP_NAME", "DEALER_MSISDN", "PRODUCT_TYPE"],
+            dropna=False
+        )
+        .agg(
+            **{
+                "عدد التفعيلات": ("SUB_MSISDN", "nunique"),
+                "مجموع النقاط": ("BUNDLE_POINT", "sum"),
+            }
+        )
+        .reset_index()
+        .rename(columns={
+            "ACTIVATION_DATE": "تاريخ التفعيل",
+            "SHOP_NAME": "اسم المكتب",
+            "DEALER_MSISDN": "رقم المكتب",
+            "PRODUCT_TYPE": "نوع الخط",
+        })
+    )
+
+    if not daily_performance.empty:
+        daily_performance["مجموع النقاط"] = daily_performance["مجموع النقاط"].apply(_clean_number)
+        daily_performance = daily_performance.sort_values(
+            ["تاريخ التفعيل", "اسم المكتب", "نوع الخط"]
+        ).reset_index(drop=True)
+
+    # ملخص الأيام: ريد + يوز + منتجات النت معاً
+    def product_family(product_type):
+        product_type = str(product_type).strip()
+
+        if product_type == "خط ريد":
+            return "ريد"
+
+        if product_type == "خط يوز" or "يوز" in product_type:
+            return "يوز"
+
+        internet_products = {
+            "خط نت 40",
+            "نت 50",
+            "ماي فاي",
+            "ماي فاي جديد",
+            "نت عادي",
+            "راوتر",
+            "راوتر جديد",
+        }
+        if product_type in internet_products:
+            return "منتجات النت"
+
+        return "أخرى"
+
+    report_raw["مجموعة المنتج"] = report_raw["PRODUCT_TYPE"].apply(product_family)
+
+    daily_family = (
+        report_raw.groupby(
+            ["ACTIVATION_DATE", "مجموعة المنتج"],
+            dropna=False
+        )["SUB_MSISDN"]
+        .nunique()
+        .reset_index(name="عدد التفعيلات")
+    )
+
+    daily_family_pivot = daily_family.pivot_table(
+        index="ACTIVATION_DATE",
+        columns="مجموعة المنتج",
+        values="عدد التفعيلات",
+        fill_value=0
+    ).reset_index()
+
+    for family_col in ["ريد", "يوز", "منتجات النت", "أخرى"]:
+        if family_col not in daily_family_pivot.columns:
+            daily_family_pivot[family_col] = 0
+
+    daily_points = (
+        report_raw.groupby("ACTIVATION_DATE", dropna=False)["BUNDLE_POINT"]
+        .sum()
+        .reset_index(name="النقاط")
+    )
+
+    daily_chart_data = daily_family_pivot.merge(
+        daily_points,
+        on="ACTIVATION_DATE",
+        how="left"
+    )
+
+    daily_chart_data["إجمالي التفعيلات"] = (
+        daily_chart_data["ريد"]
+        + daily_chart_data["يوز"]
+        + daily_chart_data["منتجات النت"]
+        + daily_chart_data["أخرى"]
+    )
+
+    daily_chart_data = daily_chart_data.rename(
+        columns={"ACTIVATION_DATE": "التاريخ"}
+    )
+
+    daily_chart_data = daily_chart_data[
+        [
+            "التاريخ",
+            "ريد",
+            "يوز",
+            "منتجات النت",
+            "أخرى",
+            "إجمالي التفعيلات",
+            "النقاط",
+        ]
+    ].sort_values("التاريخ").reset_index(drop=True)
+
+    if not daily_chart_data.empty:
+        daily_chart_data["النقاط"] = daily_chart_data["النقاط"].apply(_clean_number)
+        for family_col in ["ريد", "يوز", "منتجات النت", "أخرى", "إجمالي التفعيلات"]:
+            daily_chart_data[family_col] = daily_chart_data[family_col].astype(int)
+
+    # أداء المنتجات بدون مقارنة زمنية
+    product_summary = (
+        report_raw.groupby("مجموعة المنتج", dropna=False)
+        .agg(
+            **{
+                "عدد التفعيلات": ("SUB_MSISDN", "nunique"),
+                "مجموع النقاط": ("BUNDLE_POINT", "sum"),
+            }
+        )
+        .reset_index()
+        .rename(columns={"مجموعة المنتج": "المنتج"})
+    )
+
+    preferred_products = ["ريد", "يوز", "منتجات النت", "أخرى"]
+    product_summary["ترتيب"] = product_summary["المنتج"].apply(
+        lambda value: preferred_products.index(value)
+        if value in preferred_products else len(preferred_products)
+    )
+    product_summary = (
+        product_summary.sort_values("ترتيب")
+        .drop(columns=["ترتيب"])
+        .reset_index(drop=True)
+    )
+
+    product_summary["عدد التفعيلات"] = product_summary["عدد التفعيلات"].apply(_clean_number)
+    product_summary["مجموع النقاط"] = product_summary["مجموع النقاط"].apply(_clean_number)
+    product_summary["متوسط النقاط لكل تفعيل"] = product_summary.apply(
+        lambda row: round(row["مجموع النقاط"] / row["عدد التفعيلات"], 2)
+        if row["عدد التفعيلات"] else 0,
+        axis=1
+    )
+
+    total_product_activations = product_summary["عدد التفعيلات"].sum()
+    total_product_points = product_summary["مجموع النقاط"].sum()
+
+    product_summary["نسبة المساهمة من التفعيلات %"] = product_summary[
+        "عدد التفعيلات"
+    ].apply(
+        lambda value: round(value / total_product_activations * 100, 2)
+        if total_product_activations else 0
+    )
+
+    product_summary["نسبة المساهمة من النقاط %"] = product_summary[
+        "مجموع النقاط"
+    ].apply(
+        lambda value: round(value / total_product_points * 100, 2)
+        if total_product_points else 0
+    )
+
+    # أداء المكاتب بدون مقارنة زمنية
+    offices_performance = (
+        report_raw.groupby(["DEALER_MSISDN", "SHOP_NAME"], dropna=False)
+        .agg(
+            **{
+                "عدد التفعيلات": ("SUB_MSISDN", "nunique"),
+                "مجموع النقاط": ("BUNDLE_POINT", "sum"),
+            }
+        )
+        .reset_index()
+        .rename(columns={
+            "DEALER_MSISDN": "رقم المكتب",
+            "SHOP_NAME": "اسم المكتب",
+        })
+    )
+
+    if not offices_performance.empty:
+        offices_performance["عدد التفعيلات"] = offices_performance["عدد التفعيلات"].apply(_clean_number)
+        offices_performance["مجموع النقاط"] = offices_performance["مجموع النقاط"].apply(_clean_number)
+        offices_performance["متوسط التفعيل اليومي"] = (
+            offices_performance["عدد التفعيلات"] / selected_days
+        ).round(2)
+        offices_performance["متوسط النقاط لكل تفعيل"] = offices_performance.apply(
+            lambda row: round(row["مجموع النقاط"] / row["عدد التفعيلات"], 2)
+            if row["عدد التفعيلات"] else 0,
+            axis=1
+        )
+        offices_performance["الترتيب"] = (
+            offices_performance["عدد التفعيلات"]
+            .rank(method="dense", ascending=False)
+            .astype(int)
+        )
+        offices_performance = offices_performance.sort_values(
+            ["الترتيب", "اسم المكتب"]
+        ).reset_index(drop=True)
+
+    # التنبيهات
+    alerts = []
+
+    without_bundle_count = int(
+        report_flags.loc[
+            ~report_flags["has_any_bundle"],
+            "SUB_MSISDN"
+        ].nunique()
+    )
+    if without_bundle_count > 0:
+        alerts.append({
+            "نوع التنبيه": "خطوط بدون باقة",
+            "المكتب": "جميع المكاتب",
+            "التفاصيل": f"يوجد {without_bundle_count} خطاً مفعلاً بدون باقة.",
+            "الأولوية": "عالية",
+        })
+
+    yooz_violation_count = int(
+        report_flags.loc[
+            (report_flags["PRODUCT_TYPE"] == "خط يوز") &
+            (report_flags["has_non_yooz_violation"]),
+            "SUB_MSISDN"
+        ].nunique()
+    )
+    if yooz_violation_count > 0:
+        alerts.append({
+            "نوع التنبيه": "مخالفات يوز",
+            "المكتب": "جميع المكاتب",
+            "التفاصيل": f"يوجد {yooz_violation_count} خط يوز عليه باقة غير مناسبة.",
+            "الأولوية": "عالية",
+        })
+
+    # تنبيهات المخزون من تقرير النقاط
+    rep_points = points_report[
+        points_report["REP_NAME_SHOW"].astype(str).str.strip() == str(rep_name).strip()
+    ].copy()
+
+    stock_col = None
+    for candidate in ["total_stock_balance", "المخزون"]:
+        if candidate in rep_points.columns:
+            stock_col = candidate
+            break
+
+    if stock_col:
+        zero_stock = rep_points[
+            pd.to_numeric(rep_points[stock_col], errors="coerce").fillna(0) <= 0
+        ]
+        for _, row in zero_stock.drop_duplicates(
+            subset=[c for c in ["DEALER_MSISDN", "SHOP_NAME_SHOW", "المنتج"] if c in zero_stock.columns]
+        ).iterrows():
+            alerts.append({
+                "نوع التنبيه": "مخزون صفر",
+                "المكتب": row.get("SHOP_NAME_SHOW", row.get("DEALER_MSISDN", "غير معروف")),
+                "التفاصيل": f"لا يوجد مخزون للمنتج: {row.get('المنتج', 'غير معروف')}.",
+                "الأولوية": "عالية",
+            })
+
+    if alerts:
+        alerts_df = pd.DataFrame(alerts)
+    else:
+        alerts_df = pd.DataFrame([{
+            "نوع التنبيه": "لا توجد تنبيهات",
+            "المكتب": "—",
+            "التفاصيل": "لا توجد ملاحظات حرجة في البيانات المحددة.",
+            "الأولوية": "—",
+        }])
+
+    # البيانات التفصيلية: عرض أسماء الباقات بدلاً من رقم الخط
+    bundle_names_per_sub = (
+        df_flags_src[
+            df_flags_src["BUNDLE_NAME_CLEAN"].notna()
+            & df_flags_src["BUNDLE_NAME_CLEAN"].astype(str).str.strip().ne("")
+        ]
+        .groupby("SUB_MSISDN")["BUNDLE_NAME_CLEAN"]
+        .agg(lambda values: "، ".join(dict.fromkeys(
+            str(value).strip() for value in values if str(value).strip()
+        )))
+        .reset_index(name="أسماء الباقات")
+    )
+
+    raw_details_source = report_raw.merge(
+        bundle_names_per_sub,
+        on="SUB_MSISDN",
+        how="left"
+    )
+    raw_details_source["أسماء الباقات"] = raw_details_source[
+        "أسماء الباقات"
+    ].fillna("بدون باقة")
+
+    # إضافة المخزون / CAP حسب المكتب ونوع المنتج
+    raw_details_source["DEALER_MSISDN_normalized"] = (
+        raw_details_source["DEALER_MSISDN"].astype(str).str[-10:]
+    )
+
+    raw_details_source = raw_details_source.merge(
+        df_stock_summary[
+            ["DEALER_MSISDN_normalized", "PRODUCT_TYPE", "STOCK_BALANCE"]
+        ],
+        on=["DEALER_MSISDN_normalized", "PRODUCT_TYPE"],
+        how="left"
+    )
+    raw_details_source["STOCK_BALANCE"] = pd.to_numeric(
+        raw_details_source["STOCK_BALANCE"], errors="coerce"
+    ).fillna(0)
+
+    raw_columns = [
+        "ACTIVATION_DATE", "REP_NAME", "SHOP_NAME", "DEALER_MSISDN",
+        "PRODUCT_TYPE", "مجموعة المنتج", "أسماء الباقات",
+        "STOCK_BALANCE", "BUNDLE_POINT"
+    ]
+    if "CODE" in raw_details_source.columns:
+        raw_columns.insert(4, "CODE")
+    raw_columns = [c for c in raw_columns if c in raw_details_source.columns]
+
+    raw_details = raw_details_source[raw_columns].copy().rename(columns={
+        "ACTIVATION_DATE": "تاريخ التفعيل",
+        "REP_NAME": "المندوب",
+        "SHOP_NAME": "اسم المكتب",
+        "DEALER_MSISDN": "رقم المكتب",
+        "CODE": "الكود",
+        "PRODUCT_TYPE": "نوع الخط",
+        "مجموعة المنتج": "فئة المنتج",
+        "STOCK_BALANCE": "المخزون (CAP)",
+        "BUNDLE_POINT": "النقاط",
+    })
+
+    # حسابات المندوب التي لم تسجل أي تفعيل في البيانات المحددة
+    rep_accounts = df_customers[
+        df_customers["REP_NAME"].astype(str).str.strip() == str(rep_name).strip()
+    ].copy()
+
+    active_dealers = set(
+        report_raw["DEALER_MSISDN"].astype(str).str.strip().dropna().unique()
+    )
+
+    no_activation_accounts = rep_accounts[
+        ~rep_accounts["DEALER_MSISDN"].astype(str).str.strip().isin(active_dealers)
+    ].copy()
+
+    no_activation_accounts["DEALER_MSISDN_normalized"] = (
+        no_activation_accounts["DEALER_MSISDN"].astype(str).str[-10:]
+    )
+
+    stock_total_by_dealer = (
+        df_stock_summary.groupby("DEALER_MSISDN_normalized", as_index=False)[
+            "STOCK_BALANCE"
+        ].sum()
+        .rename(columns={"STOCK_BALANCE": "المخزون الكلي (CAP)"})
+    )
+
+    no_activation_accounts = no_activation_accounts.merge(
+        stock_total_by_dealer,
+        on="DEALER_MSISDN_normalized",
+        how="left"
+    )
+    no_activation_accounts["المخزون الكلي (CAP)"] = pd.to_numeric(
+        no_activation_accounts["المخزون الكلي (CAP)"], errors="coerce"
+    ).fillna(0)
+
+    no_activation_cols = [
+        "DEALER_MSISDN", "SHOP_NAME", "REP_NAME",
+        "OWNER_FIRST", "OWNER_LAST", "المخزون الكلي (CAP)"
+    ]
+    if "CODE" in no_activation_accounts.columns:
+        no_activation_cols.insert(1, "CODE")
+    no_activation_cols = [
+        c for c in no_activation_cols if c in no_activation_accounts.columns
+    ]
+
+    no_activation_accounts = no_activation_accounts[
+        no_activation_cols
+    ].drop_duplicates().rename(columns={
+        "DEALER_MSISDN": "رقم الحساب",
+        "CODE": "الكود",
+        "SHOP_NAME": "اسم المكتب",
+        "REP_NAME": "المندوب",
+        "OWNER_FIRST": "اسم المالك",
+        "OWNER_LAST": "اللقب",
+    })
+
+    # إنشاء ملف Excel
+    rep_output = BytesIO()
+
+    with pd.ExcelWriter(rep_output, engine="xlsxwriter") as rep_writer:
+        workbook = rep_writer.book
+
+        # تنسيقات عامة
+        title_fmt = workbook.add_format({
+            "bold": True, "font_size": 18, "font_color": "#FFFFFF",
+            "bg_color": "#1F4E78", "align": "center", "valign": "vcenter",
+        })
+        subtitle_fmt = workbook.add_format({
+            "font_size": 11, "font_color": "#666666",
+            "align": "center", "valign": "vcenter",
+        })
+        kpi_label_fmt = workbook.add_format({
+            "bold": True, "font_color": "#FFFFFF", "bg_color": "#4472C4",
+            "align": "center", "border": 1,
+        })
+        kpi_value_fmt = workbook.add_format({
+            "bold": True, "font_size": 16, "bg_color": "#D9EAF7",
+            "align": "center", "border": 1,
+        })
+        percent_fmt = workbook.add_format({"num_format": "0.00%"})
+        date_fmt = workbook.add_format({"num_format": "dd/mm/yyyy"})
+        green_fmt = workbook.add_format({"bg_color": "#C6EFCE", "font_color": "#006100"})
+        yellow_fmt = workbook.add_format({"bg_color": "#FFEB9C", "font_color": "#9C6500"})
+        red_fmt = workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
+
+        # ورقة الملخص
+        ws_dashboard = workbook.add_worksheet("ملخص الأداء")
+        ws_dashboard.right_to_left()
+        ws_dashboard.hide_gridlines(2)
+        ws_dashboard.set_column("A:A", 3)
+        ws_dashboard.set_column("B:H", 18)
+
+        ws_dashboard.merge_range("B2:H3", f"تقرير أداء المندوب: {rep_name}", title_fmt)
+        no_activation_count = len(no_activation_accounts)
+
+        # ملخص الأداء بدون مؤشرات مقارنة بين الفترات
+        kpis = [
+            ("إجمالي التفعيلات", total_activations),
+            ("مجموع النقاط", total_points),
+            ("المكاتب النشطة", office_count),
+            ("المتوسط اليومي", average_daily),
+            ("خطوط بدون باقة", without_bundle_count),
+            ("حسابات بدون تفعيل", no_activation_count),
+        ]
+
+        for idx, (label, value) in enumerate(kpis):
+            row = 4 + (idx // 3) * 3
+            col = 1 + (idx % 3) * 2
+            ws_dashboard.merge_range(row, col, row, col + 1, label, kpi_label_fmt)
+            ws_dashboard.merge_range(row + 1, col, row + 2, col + 1, value, kpi_value_fmt)
+
+        # بيانات الرسوم في أسفل لوحة الملخص
+        chart_daily_start = 15
+        daily_headers = [
+            "التاريخ",
+            "ريد",
+            "يوز",
+            "منتجات النت",
+            "أخرى",
+            "إجمالي التفعيلات",
+            "النقاط",
+        ]
+        ws_dashboard.write_row(chart_daily_start, 1, daily_headers)
+
+        for row_idx, row in daily_chart_data.iterrows():
+            excel_row = chart_daily_start + 1 + row_idx
+            ws_dashboard.write_datetime(
+                excel_row,
+                1,
+                pd.Timestamp(row["التاريخ"]).to_pydatetime(),
+                date_fmt
+            )
+            ws_dashboard.write(excel_row, 2, row["ريد"])
+            ws_dashboard.write(excel_row, 3, row["يوز"])
+            ws_dashboard.write(excel_row, 4, row["منتجات النت"])
+            ws_dashboard.write(excel_row, 5, row["أخرى"])
+            ws_dashboard.write(excel_row, 6, row["إجمالي التفعيلات"])
+            ws_dashboard.write(excel_row, 7, row["النقاط"])
+
+        if len(daily_chart_data) > 0:
+            daily_chart = workbook.add_chart({"type": "column", "subtype": "stacked"})
+
+            series_columns = [
+                ("ريد", 2),
+                ("يوز", 3),
+                ("منتجات النت", 4),
+            ]
+
+            for series_name, series_col in series_columns:
+                daily_chart.add_series({
+                    "name": series_name,
+                    "categories": [
+                        "ملخص الأداء",
+                        chart_daily_start + 1,
+                        1,
+                        chart_daily_start + len(daily_chart_data),
+                        1,
+                    ],
+                    "values": [
+                        "ملخص الأداء",
+                        chart_daily_start + 1,
+                        series_col,
+                        chart_daily_start + len(daily_chart_data),
+                        series_col,
+                    ],
+                })
+
+            daily_chart.set_title({"name": "التفعيل اليومي: ريد + يوز + منتجات النت"})
+            daily_chart.set_x_axis({"name": "التاريخ", "date_axis": True})
+            daily_chart.set_y_axis({
+                "name": "عدد التفعيلات",
+                "major_gridlines": {"visible": False}
+            })
+            daily_chart.set_legend({"position": "bottom"})
+            ws_dashboard.insert_chart(
+                "J15",
+                daily_chart,
+                {"x_scale": 1.35, "y_scale": 1.1}
+            )
+
+        product_chart_start = chart_daily_start + max(len(daily_chart_data), 1) + 4
+        ws_dashboard.write_row(product_chart_start, 1, ["المنتج", "عدد التفعيلات"])
+        for row_idx, row in product_summary.iterrows():
+            ws_dashboard.write(product_chart_start + 1 + row_idx, 1, row["المنتج"])
+            ws_dashboard.write(product_chart_start + 1 + row_idx, 2, row["عدد التفعيلات"])
+
+        if len(product_summary) > 0:
+            product_chart = workbook.add_chart({"type": "column"})
+            product_chart.add_series({
+                "name": "التفعيلات",
+                "categories": ["ملخص الأداء", product_chart_start + 1, 1,
+                               product_chart_start + len(product_summary), 1],
+                "values": ["ملخص الأداء", product_chart_start + 1, 2,
+                           product_chart_start + len(product_summary), 2],
+                "data_labels": {"value": True},
+            })
+            product_chart.set_title({"name": "التفعيل حسب نوع الخط"})
+            product_chart.set_y_axis({"name": "عدد التفعيلات", "major_gridlines": {"visible": False}})
+            product_chart.set_legend({"none": True})
+            ws_dashboard.insert_chart(
+                product_chart_start, 5, product_chart,
+                {"x_scale": 1.25, "y_scale": 1.05}
+            )
+
+        # كتابة بقية الأوراق
+        sheets_data = [
+            ("الأداء اليومي", daily_performance),
+            ("أداء المكاتب", offices_performance),
+            ("أداء المنتجات", product_summary),
+            ("التنبيهات", alerts_df),
+            ("حسابات بدون تفعيل", no_activation_accounts),
+            ("البيانات التفصيلية", raw_details),
+        ]
+
+        for sheet_name, dataframe in sheets_data:
+            dataframe.to_excel(rep_writer, sheet_name=sheet_name, index=False)
+            ws = rep_writer.sheets[sheet_name]
+            ws.right_to_left()
+            ws.freeze_panes(1, 0)
+            ws.hide_gridlines(2)
+
+            if len(dataframe.columns) > 0:
+                table_name = re.sub(r"\W+", "", sheet_name) + "Table"
+                if not table_name or not table_name[0].isalpha():
+                    table_name = "T" + table_name
+
+                ws.add_table(
+                    0, 0,
+                    max(len(dataframe), 1),
+                    len(dataframe.columns) - 1,
+                    {
+                        "name": table_name,
+                        "columns": [{"header": str(c)} for c in dataframe.columns],
+                        "style": "Table Style Medium 2",
+                    }
+                )
+
+            for col_idx, col_name in enumerate(dataframe.columns):
+                width = 16
+                if col_name in ["اسم المكتب", "التفاصيل"]:
+                    width = 34
+                elif col_name in ["المندوب", "نوع التنبيه"]:
+                    width = 24
+                elif col_name in ["تاريخ التفعيل", "التاريخ"]:
+                    width = 15
+                    ws.set_column(col_idx, col_idx, width, date_fmt)
+                    continue
+                ws.set_column(col_idx, col_idx, width)
+
+        # تلوين التقييم
+        if "التقييم" in offices_performance.columns and len(offices_performance) > 0:
+            ws_offices = rep_writer.sheets["أداء المكاتب"]
+            eval_col = offices_performance.columns.get_loc("التقييم")
+            ws_offices.conditional_format(
+                1, eval_col, len(offices_performance), eval_col,
+                {"type": "text", "criteria": "containing", "value": "ممتاز", "format": green_fmt}
+            )
+            ws_offices.conditional_format(
+                1, eval_col, len(offices_performance), eval_col,
+                {"type": "text", "criteria": "containing", "value": "يحتاج متابعة", "format": yellow_fmt}
+            )
+            ws_offices.conditional_format(
+                1, eval_col, len(offices_performance), eval_col,
+                {"type": "text", "criteria": "containing", "value": "ضعيف", "format": red_fmt}
+            )
+            ws_offices.conditional_format(
+                1, eval_col, len(offices_performance), eval_col,
+                {"type": "text", "criteria": "containing", "value": "متوقف", "format": red_fmt}
+            )
+
+        # تلوين أولوية التنبيهات
+        ws_alerts = rep_writer.sheets["التنبيهات"]
+        if "الأولوية" in alerts_df.columns and len(alerts_df) > 0:
+            priority_col = alerts_df.columns.get_loc("الأولوية")
+            ws_alerts.conditional_format(
+                1, priority_col, len(alerts_df), priority_col,
+                {"type": "text", "criteria": "containing", "value": "عالية", "format": red_fmt}
+            )
+            ws_alerts.conditional_format(
+                1, priority_col, len(alerts_df), priority_col,
+                {"type": "text", "criteria": "containing", "value": "متوسطة", "format": yellow_fmt}
+            )
+
+    rep_output.seek(0)
+    return rep_output.getvalue()
+
+
+
+# =========================================================
+# لوحة عرض متجاوبة للجوال
+# =========================================================
+def build_mobile_dashboard_data(rep_name):
+    """تجهيز بيانات عرض مبسطة ومتجاوبة للمندوب داخل Streamlit."""
+    rep_raw = daily_rep_source[
+        daily_rep_source["REP_NAME"].astype(str).str.strip() == str(rep_name).strip()
+    ].copy()
+
+    report_raw = rep_raw[
+        (rep_raw["ACTIVATION_DATE"] >= start_date) &
+        (rep_raw["ACTIVATION_DATE"] <= end_date)
+    ].copy()
+
+    selected_days = max((end_date - start_date).days + 1, 1)
+
+    flags_for_rep = bundle_flags.copy()
+    flags_for_rep["SUB_MSISDN"] = flags_for_rep["SUB_MSISDN"].astype(str).str.strip()
+
+    report_flags = report_raw.merge(flags_for_rep, on="SUB_MSISDN", how="left")
+    for flag_col in [
+        "has_any_bundle", "has_yooz_any", "has_non_yooz_violation",
+        "has_daily300", "has_pubg"
+    ]:
+        if flag_col not in report_flags.columns:
+            report_flags[flag_col] = False
+        report_flags[flag_col] = report_flags[flag_col].fillna(False)
+
+    def product_family_mobile(product_type):
+        product_type = str(product_type).strip()
+        if product_type == "خط ريد":
+            return "ريد"
+        if product_type == "خط يوز" or "يوز" in product_type:
+            return "يوز"
+        internet_products = {
+            "خط نت 40", "نت 50", "ماي فاي", "ماي فاي جديد",
+            "نت عادي", "راوتر", "راوتر جديد",
+        }
+        if product_type in internet_products:
+            return "منتجات النت"
+        return "أخرى"
+
+    report_raw["مجموعة المنتج"] = report_raw["PRODUCT_TYPE"].apply(product_family_mobile)
+
+    total_activations = int(report_raw["SUB_MSISDN"].nunique())
+    total_points = _clean_number(report_raw["BUNDLE_POINT"].sum())
+    office_count = int(report_raw["DEALER_MSISDN"].nunique())
+    average_daily = round(total_activations / selected_days, 2)
+    without_bundle_count = int(
+        report_flags.loc[~report_flags["has_any_bundle"], "SUB_MSISDN"].nunique()
+    )
+
+    daily_summary = (
+        report_raw.groupby(["ACTIVATION_DATE", "مجموعة المنتج"], dropna=False)["SUB_MSISDN"]
+        .nunique()
+        .reset_index(name="عدد التفعيلات")
+        .pivot_table(
+            index="ACTIVATION_DATE",
+            columns="مجموعة المنتج",
+            values="عدد التفعيلات",
+            fill_value=0
+        )
+        .reset_index()
+    )
+
+    for family_col in ["ريد", "يوز", "منتجات النت", "أخرى"]:
+        if family_col not in daily_summary.columns:
+            daily_summary[family_col] = 0
+
+    daily_points = (
+        report_raw.groupby("ACTIVATION_DATE", dropna=False)["BUNDLE_POINT"]
+        .sum()
+        .reset_index(name="النقاط")
+    )
+
+    daily_summary = daily_summary.merge(
+        daily_points, on="ACTIVATION_DATE", how="left"
+    ).rename(columns={"ACTIVATION_DATE": "التاريخ"})
+
+    daily_summary["إجمالي التفعيلات"] = (
+        daily_summary["ريد"] + daily_summary["يوز"]
+        + daily_summary["منتجات النت"] + daily_summary["أخرى"]
+    )
+
+    daily_summary = daily_summary[
+        ["التاريخ", "ريد", "يوز", "منتجات النت", "أخرى", "إجمالي التفعيلات", "النقاط"]
+    ].sort_values("التاريخ").reset_index(drop=True)
+
+    offices = (
+        report_raw.groupby(["DEALER_MSISDN", "SHOP_NAME"], dropna=False)
+        .agg(
+            **{
+                "عدد التفعيلات": ("SUB_MSISDN", "nunique"),
+                "مجموع النقاط": ("BUNDLE_POINT", "sum"),
+            }
+        )
+        .reset_index()
+        .rename(columns={
+            "DEALER_MSISDN": "رقم المكتب",
+            "SHOP_NAME": "اسم المكتب",
+        })
+    )
+
+    if not offices.empty:
+        offices["متوسط يومي"] = (offices["عدد التفعيلات"] / selected_days).round(2)
+        offices["مجموع النقاط"] = offices["مجموع النقاط"].apply(_clean_number)
+        offices = offices.sort_values(
+            ["عدد التفعيلات", "مجموع النقاط"],
+            ascending=[False, False]
+        ).reset_index(drop=True)
+        offices.insert(0, "الترتيب", range(1, len(offices) + 1))
+
+    products = (
+        report_raw.groupby("مجموعة المنتج", dropna=False)
+        .agg(
+            **{
+                "عدد التفعيلات": ("SUB_MSISDN", "nunique"),
+                "مجموع النقاط": ("BUNDLE_POINT", "sum"),
+            }
+        )
+        .reset_index()
+        .rename(columns={"مجموعة المنتج": "المنتج"})
+    )
+    if not products.empty:
+        products["مجموع النقاط"] = products["مجموع النقاط"].apply(_clean_number)
+        products = products.sort_values("عدد التفعيلات", ascending=False).reset_index(drop=True)
+
+    rep_accounts = df_customers[
+        df_customers["REP_NAME"].astype(str).str.strip() == str(rep_name).strip()
+    ].copy()
+
+    active_dealers = set(
+        report_raw["DEALER_MSISDN"].astype(str).str.strip().dropna().unique()
+    )
+
+    no_activation = rep_accounts[
+        ~rep_accounts["DEALER_MSISDN"].astype(str).str.strip().isin(active_dealers)
+    ].copy()
+
+    no_activation["DEALER_MSISDN_normalized"] = (
+        no_activation["DEALER_MSISDN"].astype(str).str[-10:]
+    )
+
+    stock_total_by_dealer = (
+        df_stock_summary.groupby("DEALER_MSISDN_normalized", as_index=False)["STOCK_BALANCE"]
+        .sum()
+        .rename(columns={"STOCK_BALANCE": "المخزون الكلي (CAP)"})
+    )
+
+    no_activation = no_activation.merge(
+        stock_total_by_dealer,
+        on="DEALER_MSISDN_normalized",
+        how="left"
+    )
+    no_activation["المخزون الكلي (CAP)"] = pd.to_numeric(
+        no_activation["المخزون الكلي (CAP)"], errors="coerce"
+    ).fillna(0)
+
+    no_activation_cols = [
+        "DEALER_MSISDN", "CODE", "SHOP_NAME",
+        "OWNER_FIRST", "OWNER_LAST", "المخزون الكلي (CAP)"
+    ]
+    no_activation_cols = [c for c in no_activation_cols if c in no_activation.columns]
+    no_activation = no_activation[no_activation_cols].rename(columns={
+        "DEALER_MSISDN": "رقم المكتب",
+        "CODE": "الكود",
+        "SHOP_NAME": "اسم المكتب",
+        "OWNER_FIRST": "اسم المالك",
+        "OWNER_LAST": "لقب المالك",
+    }).reset_index(drop=True)
+
+    metrics = {
+        "إجمالي التفعيلات": total_activations,
+        "مجموع النقاط": total_points,
+        "المكاتب النشطة": office_count,
+        "المتوسط اليومي": average_daily,
+        "خطوط بدون باقة": without_bundle_count,
+        "حسابات بدون تفعيل": len(no_activation),
+    }
+
+    return {
+        "metrics": metrics,
+        "daily": daily_summary,
+        "offices": offices,
+        "products": products,
+        "no_activation": no_activation,
+    }
+
+
+def render_mobile_dashboard(rep_name):
+    dashboard = build_mobile_dashboard_data(rep_name)
+
+    st.markdown(
+        """
+        <style>
+        .mobile-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 10px 0 18px 0;
+        }
+        .mobile-kpi-card {
+            background: white;
+            border: 1px solid #e6e8eb;
+            border-radius: 14px;
+            padding: 14px 10px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+        .mobile-kpi-title {
+            color: #5f6368;
+            font-size: 0.88rem;
+            margin-bottom: 6px;
+        }
+        .mobile-kpi-value {
+            color: #0f5132;
+            font-size: 1.55rem;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        @media (max-width: 700px) {
+            .block-container {
+                padding-top: 1rem;
+                padding-left: 0.65rem;
+                padding-right: 0.65rem;
+            }
+            .mobile-kpi-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 8px;
+            }
+            .mobile-kpi-card {
+                padding: 12px 6px;
+            }
+            .mobile-kpi-title {
+                font-size: 0.78rem;
+            }
+            .mobile-kpi-value {
+                font-size: 1.3rem;
+            }
+            div[data-testid="stDataFrame"] {
+                font-size: 0.78rem;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    metric_cards = "".join(
+        f"""
+        <div class="mobile-kpi-card">
+            <div class="mobile-kpi-title">{label}</div>
+            <div class="mobile-kpi-value">{value}</div>
+        </div>
+        """
+        for label, value in dashboard["metrics"].items()
+    )
+    st.markdown(
+        f'<div class="mobile-kpi-grid">{metric_cards}</div>',
+        unsafe_allow_html=True,
+    )
+
+    tab_summary, tab_daily, tab_offices, tab_products, tab_inactive = st.tabs([
+        "📊 الملخص",
+        "📅 اليومي",
+        "🏢 المكاتب",
+        "📦 المنتجات",
+        "⛔ بدون تفعيل",
+    ])
+
+    with tab_summary:
+        st.subheader(f"أداء {rep_name}")
+        if dashboard["daily"].empty:
+            st.info("لا توجد بيانات ضمن التاريخ المحدد.")
+        else:
+            chart_data = dashboard["daily"].set_index("التاريخ")[
+                ["ريد", "يوز", "منتجات النت", "أخرى"]
+            ]
+            st.bar_chart(chart_data, use_container_width=True)
+
+            points_data = dashboard["daily"].set_index("التاريخ")[["النقاط"]]
+            st.line_chart(points_data, use_container_width=True)
+
+    with tab_daily:
+        st.dataframe(
+            dashboard["daily"],
+            use_container_width=True,
+            hide_index=True,
+            height=430,
+        )
+
+    with tab_offices:
+        search_office = st.text_input(
+            "بحث باسم أو رقم المكتب",
+            key=f"mobile_office_search_{rep_name}",
+            placeholder="اكتب جزءاً من اسم المكتب أو رقمه",
+        )
+        offices_view = dashboard["offices"].copy()
+        if search_office and not offices_view.empty:
+            mask = (
+                offices_view["اسم المكتب"].astype(str).str.contains(
+                    search_office, case=False, na=False
+                )
+                | offices_view["رقم المكتب"].astype(str).str.contains(
+                    search_office, case=False, na=False
+                )
+            )
+            offices_view = offices_view[mask]
+
+        st.dataframe(
+            offices_view,
+            use_container_width=True,
+            hide_index=True,
+            height=480,
+        )
+
+    with tab_products:
+        st.dataframe(
+            dashboard["products"],
+            use_container_width=True,
+            hide_index=True,
+        )
+        if not dashboard["products"].empty:
+            st.bar_chart(
+                dashboard["products"].set_index("المنتج")[["عدد التفعيلات"]],
+                use_container_width=True,
+            )
+
+    with tab_inactive:
+        st.caption(
+            f"عدد الحسابات بدون تفعيل: {len(dashboard['no_activation'])}"
+        )
+        st.dataframe(
+            dashboard["no_activation"],
+            use_container_width=True,
+            hide_index=True,
+            height=480,
+        )
+
+
+available_reps = sorted(
+    daily_rep_source["REP_NAME"]
+    .dropna()
+    .astype(str)
+    .str.strip()
+    .loc[lambda series: series.ne("") & series.ne("غير معروف")]
+    .unique()
+    .tolist()
+)
+
+if available_reps:
+    selected_rep = st.selectbox(
+        "اختر المندوب",
+        available_reps,
+        key="selected_representative_performance"
+    )
+
+    st.subheader("📱 العرض المبسط للجوال")
+    render_mobile_dashboard(selected_rep)
+
+    st.divider()
+    st.subheader("📥 تحميل التقرير")
+    selected_rep_excel = build_representative_workbook(selected_rep)
+
+    st.download_button(
+        label=f"⬇️ تحميل تقرير أداء {selected_rep}",
+        data=selected_rep_excel,
+        file_name=f"تقرير_أداء_{_safe_file_name(selected_rep)}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_selected_representative"
+    )
+
+    with st.expander("تحميل تقارير جميع المندوبين في ملف ZIP"):
+        st.caption("قد يستغرق الإنشاء وقتاً أطول عند وجود عدد كبير من المندوبين.")
+
+        if st.button("إنشاء ملف ZIP لجميع المندوبين", key="build_all_reps_zip"):
+            zip_output = BytesIO()
+            progress = st.progress(0)
+
+            with zipfile.ZipFile(
+                zip_output,
+                mode="w",
+                compression=zipfile.ZIP_DEFLATED
+            ) as zip_file:
+                for index, rep in enumerate(available_reps, start=1):
+                    rep_bytes = build_representative_workbook(rep)
+                    zip_file.writestr(
+                        f"تقرير_أداء_{_safe_file_name(rep)}.xlsx",
+                        rep_bytes
+                    )
+                    progress.progress(index / len(available_reps))
+
+            zip_output.seek(0)
+            st.session_state["all_representatives_zip"] = zip_output.getvalue()
+            st.success("تم تجهيز تقارير جميع المندوبين.")
+
+        if "all_representatives_zip" in st.session_state:
+            st.download_button(
+                label="⬇️ تحميل جميع تقارير المندوبين (ZIP)",
+                data=st.session_state["all_representatives_zip"],
+                file_name="تقارير_أداء_جميع_المندوبين.zip",
+                mime="application/zip",
+                key="download_all_reps_zip"
+            )
+else:
+    st.warning("لا توجد أسماء مندوبين متاحة لإنشاء التقارير الفردية.")
